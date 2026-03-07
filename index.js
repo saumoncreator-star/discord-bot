@@ -3,8 +3,8 @@ const {
   REST, Routes, EmbedBuilder, PermissionFlagsBits
 } = require('discord.js');
 
-const TOKEN = 'ton_token_discord';
-const CLIENT_ID = 'id_de_ton_bot';
+const TOKEN = 'TOKEN';
+const CLIENT_ID = 'CLIENT_ID';
 const DASHBOARD_URL = 'https://simezath-bot.base44.app';
 
 const client = new Client({
