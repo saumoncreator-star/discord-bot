@@ -3,9 +3,9 @@ const {
   REST, Routes, EmbedBuilder, PermissionFlagsBits
 } = require('discord.js');
 
-const TOKEN = 'TOKEN';
-const CLIENT_ID = '1479813875481317507';
-const DASHBOARD_URL = 'https://simezath-bot.base44.app';
+const TOKEN = process.env.TOKEN;
+const CLIENT_ID = process.env.CLIENT_ID;
+const DASHBOARD_URL = process.env.DASHBOARD_URL;
 
 const client = new Client({
   intents: [
