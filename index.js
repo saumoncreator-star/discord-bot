@@ -2,11 +2,11 @@ const {
   Client, GatewayIntentBits, SlashCommandBuilder,
   REST, Routes, EmbedBuilder, PermissionFlagsBits
 } = require('discord.js');
+const { createClient } = require('@base44/sdk');
 
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
 const DASHBOARD_URL = process.env.DASHBOARD_URL || 'https://ton-site.com';
-const BASE44_API_KEY = process.env.BASE44_API_KEY;
 const BASE44_APP_ID = process.env.BASE44_APP_ID;
 
 const client = new Client({
@@ -19,37 +19,16 @@ const client = new Client({
   ],
 });
 
-// ── BASE44 API HELPERS ────────────────────────────────
-async function b44Get(path) {
-  const res = await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${path}`, {
-    headers: { 'x-api-key': BASE44_API_KEY }
-  });
-  return res.json();
-}
-
-async function b44Post(entity, body) {
-  await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${entity}`, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': BASE44_API_KEY },
-    body: JSON.stringify(body),
-  });
-}
-
-async function b44Patch(entity, id, body) {
-  await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${entity}/${id}`, {
-    method: 'PATCH',
-    headers: { 'Content-Type': 'application/json', 'x-api-key': BASE44_API_KEY },
-    body: JSON.stringify(body),
-  });
-}
+// ── BASE44 SDK ────────────────────────────────────────
+const b44 = createClient({ appId: BASE44_APP_ID });
 
 // ── ENREGISTREMENT SERVEUR ────────────────────────────
 async function registerServer(guild) {
-  if (!BASE44_API_KEY || !BASE44_APP_ID) return;
+  if (!BASE44_APP_ID) return;
   try {
-    const existing = await b44Get(`Server?server_id=${guild.id}`);
-    if (existing && existing.length > 0) return; // déjà enregistré
-    await b44Post('Server', {
+    const existing = await b44.entities.Server.filter({ server_id: guild.id });
+    if (existing && existing.length > 0) return;
+    await b44.entities.Server.create({
       server_id: guild.id,
       server_name: guild.name,
       server_icon: guild.iconURL() || '',
@@ -61,20 +40,20 @@ async function registerServer(guild) {
   }
 }
 
-// ── TRACKING GIF VERS BASE44 ──────────────────────────
+// ── TRACKING GIF ──────────────────────────────────────
 async function trackGif(serverId, url, username) {
-  if (!BASE44_API_KEY || !BASE44_APP_ID) return;
+  if (!BASE44_APP_ID) return;
   try {
-    const existing = await b44Get(`GifStat?server_id=${serverId}&gif_url=${encodeURIComponent(url)}`);
+    const existing = await b44.entities.GifStat.filter({ server_id: serverId, gif_url: url });
     if (existing && existing.length > 0) {
       const rec = existing[0];
-      await b44Patch('GifStat', rec.id, {
+      await b44.entities.GifStat.update(rec.id, {
         usage_count: (rec.usage_count || 0) + 1,
         last_used_by: username,
         last_used_date: new Date().toISOString(),
       });
     } else {
-      await b44Post('GifStat', {
+      await b44.entities.GifStat.create({
         server_id: serverId,
         gif_url: url,
         gif_name: url,
@@ -118,7 +97,7 @@ const commands = [
     .addUserOption(o => o.setName('utilisateur').setDescription('Utilisateur jugé').setRequired(true))
     .addStringOption(o => o.setName('raison').setDescription('Raison du jugement').setRequired(true))
     .addChannelOption(o => o.setName('salon').setDescription('Salon de conférence').setRequired(true))
-    .addStringOption(o => o.setName('date').setDescription('Date (ex: 12/12/2026)').setRequired(true)),
+    .addStringOption(o => o.setName('date').setDescription('Date et heure (ex: 12/12/2026 20:00)').setRequired(true)),
 
   new SlashCommandBuilder()
     .setName('dailymoney')
@@ -199,7 +178,7 @@ client.on('interactionCreate', async (interaction) => {
   // ── /topgif ──
   if (commandName === 'topgif') {
     try {
-      const gifs = await b44Get(`GifStat?server_id=${guild.id}`);
+      const gifs = await b44.entities.GifStat.filter({ server_id: guild.id });
       if (!gifs || gifs.length === 0) {
         return interaction.reply({ content: "Aucun GIF enregistré pour le moment !", ephemeral: true });
       }
@@ -231,7 +210,7 @@ client.on('interactionCreate', async (interaction) => {
         `[${DASHBOARD_URL}](${DASHBOARD_URL})`
       )
       .setColor(0x9B59B6)
-      .setFooter({ text: 'Reviens demain pour un nouveau booster !' });
+      .setFooter({ text: 'Simezath Bot' });
     return interaction.reply({ embeds: [embed] });
   }
 
@@ -245,7 +224,8 @@ client.on('interactionCreate', async (interaction) => {
         `Voici le lien pour voir ta collection :\n` +
         `[${DASHBOARD_URL}/card-index?serverId=${guild.id}&userId=${userId}](${DASHBOARD_URL})`
       )
-      .setColor(0x5865F2);
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Simezath Bot' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
@@ -261,9 +241,17 @@ client.on('interactionCreate', async (interaction) => {
     const target = interaction.options.getUser('utilisateur');
     const raison = interaction.options.getString('raison');
     const salon = interaction.options.getChannel('salon');
-    const date = interaction.options.getString('date');
-    const [day, month, year] = date.split('/');
-    const eventDate = new Date(`${year}-${month}-${day}T20:00:00`);
+    const dateStr = interaction.options.getString('date');
+
+    // Format accepté : "DD/MM/YYYY HH:MM" ou "DD/MM/YYYY"
+    const [datePart, timePart] = dateStr.split(' ');
+    const [day, month, year] = datePart.split('/');
+    const [hours, minutes] = timePart ? timePart.split(':') : ['20', '00'];
+    const eventDate = new Date(`${year}-${month.padStart(2,'0')}-${day.padStart(2,'0')}T${hours.padStart(2,'0')}:${minutes.padStart(2,'0')}:00`);
+
+    if (isNaN(eventDate.getTime())) {
+      return interaction.reply({ content: '❌ Date invalide. Utilise le format : `12/12/2026 20:00`', ephemeral: true });
+    }
 
     await guild.scheduledEvents.create({
       name: `Jugement de ${target.username}`,
@@ -276,7 +264,7 @@ client.on('interactionCreate', async (interaction) => {
     }).catch(console.error);
 
     return interaction.reply({
-      content: `⚖️ Event créé : **Jugement de ${target.username}** le ${date} — Raison : ${raison}`,
+      content: `⚖️ Event créé : **Jugement de ${target.username}** le ${datePart} à ${hours}:${minutes} — Raison : ${raison}`,
     });
   }
 
@@ -295,7 +283,8 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder()
       .setTitle('🛒 Shop du serveur')
       .setDescription('Aucun article disponible pour le moment.')
-      .setColor(0x5865F2);
+      .setColor(0x5865F2)
+      .setFooter({ text: 'Simezath Bot' });
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
