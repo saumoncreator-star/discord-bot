@@ -5,7 +5,7 @@ const {
 
 const TOKEN = process.env.BOT_TOKEN;
 const CLIENT_ID = process.env.CLIENT_ID;
-const DASHBOARD_URL = process.env.DASHBOARD_URL;
+const DASHBOARD_URL = process.env.DASHBOARD_URL || 'https://ton-site.com';
 const BASE44_API_KEY = process.env.BASE44_API_KEY;
 const BASE44_APP_ID = process.env.BASE44_APP_ID;
 
@@ -19,8 +19,74 @@ const client = new Client({
   ],
 });
 
-// ── GIF TRACKING ──────────────────────────────────────
-const gifCounts = new Map();
+// ── BASE44 API HELPERS ────────────────────────────────
+async function b44Get(path) {
+  const res = await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${path}`, {
+    headers: { 'x-api-key': BASE44_API_KEY }
+  });
+  return res.json();
+}
+
+async function b44Post(entity, body) {
+  await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${entity}`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': BASE44_API_KEY },
+    body: JSON.stringify(body),
+  });
+}
+
+async function b44Patch(entity, id, body) {
+  await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/${entity}/${id}`, {
+    method: 'PATCH',
+    headers: { 'Content-Type': 'application/json', 'x-api-key': BASE44_API_KEY },
+    body: JSON.stringify(body),
+  });
+}
+
+// ── ENREGISTREMENT SERVEUR ────────────────────────────
+async function registerServer(guild) {
+  if (!BASE44_API_KEY || !BASE44_APP_ID) return;
+  try {
+    const existing = await b44Get(`Server?server_id=${guild.id}`);
+    if (existing && existing.length > 0) return; // déjà enregistré
+    await b44Post('Server', {
+      server_id: guild.id,
+      server_name: guild.name,
+      server_icon: guild.iconURL() || '',
+      bot_enabled: true,
+    });
+    console.log(`✅ Serveur enregistré: ${guild.name}`);
+  } catch (e) {
+    console.error(`❌ Erreur registerServer:`, e.message);
+  }
+}
+
+// ── TRACKING GIF VERS BASE44 ──────────────────────────
+async function trackGif(serverId, url, username) {
+  if (!BASE44_API_KEY || !BASE44_APP_ID) return;
+  try {
+    const existing = await b44Get(`GifStat?server_id=${serverId}&gif_url=${encodeURIComponent(url)}`);
+    if (existing && existing.length > 0) {
+      const rec = existing[0];
+      await b44Patch('GifStat', rec.id, {
+        usage_count: (rec.usage_count || 0) + 1,
+        last_used_by: username,
+        last_used_date: new Date().toISOString(),
+      });
+    } else {
+      await b44Post('GifStat', {
+        server_id: serverId,
+        gif_url: url,
+        gif_name: url,
+        usage_count: 1,
+        last_used_by: username,
+        last_used_date: new Date().toISOString(),
+      });
+    }
+  } catch (e) {
+    console.error(`❌ Erreur trackGif:`, e.message);
+  }
+}
 
 // ── SLASH COMMANDS ────────────────────────────────────
 const commands = [
@@ -88,47 +154,21 @@ const commands = [
 
 const rest = new REST({ version: '10' }).setToken(TOKEN);
 
-// ── ENREGISTREMENT SERVEUR SUR BASE44 ─────────────────
-async function registerServer(guild) {
-  if (!BASE44_API_KEY || !BASE44_APP_ID) return;
-  try {
-    await fetch(`https://api.base44.com/api/apps/${BASE44_APP_ID}/entities/Server`, {
-      method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'x-api-key': BASE44_API_KEY,
-      },
-      body: JSON.stringify({
-        server_id: guild.id,
-        server_name: guild.name,
-        server_icon: guild.iconURL() || '',
-        bot_enabled: true,
-      }),
-    });
-    console.log(`✅ Serveur enregistré sur le dashboard: ${guild.name}`);
-  } catch (e) {
-    console.error(`❌ Erreur enregistrement serveur ${guild.name}:`, e.message);
-  }
-}
-
 // ── READY ─────────────────────────────────────────────
 client.once('ready', async () => {
   console.log(`✅ Connecté en tant que ${client.user.tag}`);
   await rest.put(Routes.applicationCommands(CLIENT_ID), { body: commands });
   console.log('📝 Commandes slash enregistrées');
-
-  // Enregistre tous les serveurs déjà présents
   for (const guild of client.guilds.cache.values()) {
     await registerServer(guild);
   }
 });
 
-// Quand le bot rejoint un nouveau serveur
 client.on('guildCreate', async (guild) => {
   await registerServer(guild);
 });
 
-// ── MESSAGE HANDLER (GIFs) ────────────────────────────
+// ── MESSAGE HANDLER ───────────────────────────────────
 client.on('messageCreate', async (message) => {
   if (message.author.bot || !message.guild) return;
   const sid = message.guild.id;
@@ -136,12 +176,10 @@ client.on('messageCreate', async (message) => {
   const gifRegex = /https?:\/\/[^\s]+\.gif(\?[^\s]*)?|https?:\/\/tenor\.com\/view\/[^\s]+|https?:\/\/media\.tenor\.com\/[^\s]+|https?:\/\/media[0-9]?\.giphy\.com\/[^\s]+/gi;
   const gifs = [...(message.content.match(gifRegex) || [])];
   message.embeds?.forEach(e => { if (e.type === 'gifv' && e.url) gifs.push(e.url); });
-  if (!gifCounts.has(sid)) gifCounts.set(sid, new Map());
-  gifs.forEach(url => {
-    const m = gifCounts.get(sid);
-    const ex = m.get(url) || { count: 0 };
-    m.set(url, { count: ex.count + 1, lastUser: message.author.username });
-  });
+
+  for (const url of gifs) {
+    await trackGif(sid, url, message.author.username);
+  }
 });
 
 // ── MEMBER JOIN / LEAVE ───────────────────────────────
@@ -160,23 +198,27 @@ client.on('interactionCreate', async (interaction) => {
 
   // ── /topgif ──
   if (commandName === 'topgif') {
-    const serverGifs = gifCounts.get(guild.id);
-    if (!serverGifs || serverGifs.size === 0) {
-      return interaction.reply({ content: "Aucun GIF enregistré pour le moment !", ephemeral: true });
+    try {
+      const gifs = await b44Get(`GifStat?server_id=${guild.id}`);
+      if (!gifs || gifs.length === 0) {
+        return interaction.reply({ content: "Aucun GIF enregistré pour le moment !", ephemeral: true });
+      }
+      const sorted = gifs.sort((a, b) => (b.usage_count || 0) - (a.usage_count || 0)).slice(0, 10);
+      const medals = ['🥇', '🥈', '🥉'];
+      const desc = sorted.map((g, i) =>
+        `${i < 3 ? medals[i] : `**${i + 1}.**`} [GIF](${g.gif_url}) — **${g.usage_count}** utilisations _(dernier: ${g.last_used_by || '?'})_`
+      ).join('\n');
+      const embed = new EmbedBuilder()
+        .setTitle('🏆 Top GIFs du serveur')
+        .setDescription(desc)
+        .setColor(0x5865F2)
+        .setFooter({ text: 'Simezath Bot' })
+        .setTimestamp();
+      if (sorted[0]) embed.setThumbnail(sorted[0].gif_url);
+      return interaction.reply({ embeds: [embed] });
+    } catch (e) {
+      return interaction.reply({ content: "Erreur lors de la récupération des GIFs.", ephemeral: true });
     }
-    const sorted = [...serverGifs.entries()].sort(([, a], [, b]) => b.count - a.count).slice(0, 10);
-    const medals = ['🥇', '🥈', '🥉'];
-    const desc = sorted.map(([url, d], i) =>
-      `${i < 3 ? medals[i] : `**${i + 1}.**`} [GIF](${url}) — **${d.count}** utilisations _(dernier: ${d.lastUser})_`
-    ).join('\n');
-    const embed = new EmbedBuilder()
-      .setTitle('🏆 Top GIFs du serveur')
-      .setDescription(desc)
-      .setColor(0x5865F2)
-      .setFooter({ text: 'Simezath Bot' })
-      .setTimestamp();
-    if (sorted[0]) embed.setThumbnail(sorted[0][0]);
-    return interaction.reply({ embeds: [embed] });
   }
 
   // ── /dailybooster ──
@@ -220,7 +262,6 @@ client.on('interactionCreate', async (interaction) => {
     const raison = interaction.options.getString('raison');
     const salon = interaction.options.getChannel('salon');
     const date = interaction.options.getString('date');
-
     const [day, month, year] = date.split('/');
     const eventDate = new Date(`${year}-${month}-${day}T20:00:00`);
 
@@ -236,7 +277,6 @@ client.on('interactionCreate', async (interaction) => {
 
     return interaction.reply({
       content: `⚖️ Event créé : **Jugement de ${target.username}** le ${date} — Raison : ${raison}`,
-      ephemeral: false,
     });
   }
 
@@ -255,8 +295,7 @@ client.on('interactionCreate', async (interaction) => {
     const embed = new EmbedBuilder()
       .setTitle('🛒 Shop du serveur')
       .setDescription('Aucun article disponible pour le moment.')
-      .setColor(0x5865F2)
-      .setFooter({ text: 'Ce message disparaît dans 60s' });
+      .setColor(0x5865F2);
     return interaction.reply({ embeds: [embed], ephemeral: true });
   }
 
